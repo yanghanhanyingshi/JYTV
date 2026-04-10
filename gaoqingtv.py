@@ -1,6 +1,6 @@
 import requests
 import re
-import time
+import json
 import socket
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
@@ -20,75 +20,129 @@ def get_beijing_time():
     return beijing_now.strftime("%Y%m%d %H:%M")
 
 def fetch_content(url):
-    headers = {"User-Agent": USER_AGENT}
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://proxy.api.030101.xyz/",
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
-        resp.encoding = 'utf-8'
+        # 尝试自动检测编码
+        resp.encoding = resp.apparent_encoding or 'utf-8'
         return resp.text
     except Exception as e:
         print(f"❌ 获取源失败: {e}")
         return None
 
-def parse_m3u(content):
+def parse_auto(content):
     """
-    解析 M3U 内容，提取频道名称和 URL。
-    兼容多种写法：
-      - #EXTINF:-1 tvg-name="CCTV1" group-title="央视",CCTV1
-      - #EXTINF:-1 ,CCTV1
-      - #EXTINF:-1,CCTV1
-      - 无逗号的 #EXTINF 行，尝试从属性中提取 tvg-name
+    自适应解析：
+    1. 尝试 JSON 格式
+    2. 尝试 M3U 格式
+    3. 尝试每行 URL 格式
+    4. 尝试带 #genre# 的分组格式
+    返回列表 [(name, url, group)]
     """
-    lines = content.splitlines()
     channels = []
-    current_name = None
-    current_group = GROUP_NAME  # 默认分组
+    content = content.strip()
+    
+    # 1. JSON 尝试
+    if content.startswith('{') or content.startswith('['):
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                # 假设常见结构: {"channels": [...]} 或 {"data": [...]}
+                items = data.get('channels') or data.get('data') or data.get('list') or []
+            elif isinstance(data, list):
+                items = data
+            else:
+                items = []
+            for item in items:
+                if isinstance(item, dict):
+                    name = item.get('name') or item.get('title') or item.get('channel') or '未知频道'
+                    url = item.get('url') or item.get('link') or item.get('source') or ''
+                    group = item.get('group') or item.get('category') or GROUP_NAME
+                    if url:
+                        channels.append((str(name), str(url), str(group)))
+            if channels:
+                print(f"✅ 通过 JSON 解析到 {len(channels)} 个频道")
+                return channels
+        except:
+            pass
 
+    # 2. M3U 格式
+    if '#EXTM3U' in content or '#EXTINF' in content:
+        lines = content.splitlines()
+        current_name = None
+        current_group = GROUP_NAME
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#EXTM3U"):
+                continue
+            if line.startswith("#EXTINF"):
+                # 提取属性
+                if ',' in line:
+                    attr_part, name_part = line.split(',', 1)
+                    name = name_part.strip()
+                else:
+                    attr_part = line
+                    name = ""
+                tvg_match = re.search(r'tvg-name="([^"]*)"', attr_part, re.I)
+                if tvg_match:
+                    name = tvg_match.group(1).strip()
+                group_match = re.search(r'group-title="([^"]*)"', attr_part, re.I)
+                if group_match:
+                    current_group = group_match.group(1).strip()
+                if not name:
+                    name = "未命名频道"
+                current_name = name
+            elif line and not line.startswith("#"):
+                if current_name:
+                    channels.append((current_name, line, current_group))
+                    current_name = None
+                else:
+                    channels.append(("未知频道", line, GROUP_NAME))
+        if channels:
+            print(f"✅ 通过 M3U 解析到 {len(channels)} 个频道")
+            return channels
+
+    # 3. 纯 URL 列表（每行一个 http/https 链接）
+    url_pattern = re.compile(r'^(https?://[^\s]+)$', re.I)
+    lines = content.splitlines()
     for line in lines:
         line = line.strip()
-        if not line or line.startswith("#EXTM3U"):
-            continue
+        if url_pattern.match(line):
+            channels.append(("直播源", line, GROUP_NAME))
+    if channels:
+        print(f"✅ 通过 URL 列表解析到 {len(channels)} 个频道")
+        return channels
 
-        if line.startswith("#EXTINF"):
-            # 提取属性部分（逗号前的内容）
-            if ',' in line:
-                attr_part, name_part = line.split(',', 1)
-                name = name_part.strip()
-            else:
-                attr_part = line
-                name = ""
+    # 4. 带 #genre# 的分组格式 (用户示例格式)
+    current_group = GROUP_NAME
+    for line in lines:
+        if ',' in line and '#genre#' in line:
+            # 分组头
+            parts = line.split(',')
+            if len(parts) >= 2 and parts[1].strip() == '#genre#':
+                current_group = parts[0].strip()
+        elif ',' in line and not line.startswith('#'):
+            # 格式: 时间,URL  或者 频道名,URL
+            parts = line.split(',')
+            if len(parts) >= 2:
+                name = parts[0].strip()
+                url = parts[1].strip()
+                if url.startswith('http'):
+                    channels.append((name, url, current_group))
+    if channels:
+        print(f"✅ 通过 #genre# 格式解析到 {len(channels)} 个频道")
+        return channels
 
-            # 尝试从属性中提取 tvg-name
-            tvg_match = re.search(r'tvg-name="([^"]*)"', attr_part, re.I)
-            if tvg_match:
-                name = tvg_match.group(1).strip()
-
-            # 尝试提取 group-title
-            group_match = re.search(r'group-title="([^"]*)"', attr_part, re.I)
-            if group_match:
-                current_group = group_match.group(1).strip()
-
-            # 如果名称仍为空，使用默认
-            if not name:
-                name = "未命名频道"
-
-            current_name = name
-
-        elif line and not line.startswith("#"):
-            # 这是一个 URL 行
-            if current_name is not None:
-                channels.append((current_name, line, current_group))
-                current_name = None
-                # 注意：分组可能保持上一个有效 group，若没有 group 则用默认
-            else:
-                # 没有 EXTINF 直接出现的 URL，分配默认名称
-                channels.append(("未知频道", line, GROUP_NAME))
-
-    print(f"🔍 解析到原始频道数: {len(channels)}")
-    return channels
+    print("⚠️ 无法识别任何格式，返回空列表")
+    return []
 
 def test_url_speed(url, timeout=SPEED_TEST_TIMEOUT):
-    """通过 TCP 连接测试连通性，失败则降级为 HEAD 请求"""
     try:
         parsed = urlparse(url)
         host = parsed.hostname
@@ -109,7 +163,6 @@ def test_url_speed(url, timeout=SPEED_TEST_TIMEOUT):
             return False
 
 def deduplicate_channels(channels):
-    """按 URL 去重，保留首次出现的名称与分组"""
     seen = set()
     unique = []
     for name, url, group in channels:
@@ -125,12 +178,11 @@ def main():
         print("❌ 未获取到内容，退出。")
         return
 
-    # 打印前500字符供调试
-    print("📄 源内容预览:\n" + content[:500] + "\n...")
+    print("📄 源内容预览 (前1000字符):\n" + content[:1000] + "\n...")
 
-    channels = parse_m3u(content)
+    channels = parse_auto(content)
     if not channels:
-        print("⚠️ 未解析到任何频道，请检查 M3U 格式。")
+        print("❌ 未能解析到任何频道，请检查预览内容并调整解析逻辑。")
         return
 
     channels = deduplicate_channels(channels)
@@ -139,20 +191,18 @@ def main():
     update_time = get_beijing_time()
     print(f"⏰ 北京时间: {update_time}")
 
-    # 测速过滤
+    # 测速过滤（可选关闭以加速）
+    print("⏳ 开始测速（若频道过多可能较慢）...")
     valid_channels = []
     total = len(channels)
     for idx, (name, url, group) in enumerate(channels, 1):
-        print(f"🔍 测速 ({idx}/{total}): {name[:30]}... ", end="")
+        if idx % 10 == 0:
+            print(f"  进度: {idx}/{total}")
         if test_url_speed(url):
-            print("✅ 可用")
             valid_channels.append((name, url, group))
-        else:
-            print("❌ 不可达")
-
     print(f"📊 有效频道数: {len(valid_channels)}")
 
-    # 生成输出：每行 "北京时间,URL" （不包含频道名，因为用户示例格式如此）
+    # 生成输出：按照用户要求的格式 "北京时间,URL"
     header = f"{GROUP_NAME},#genre#\n"
     lines = [f"{update_time},{url}" for _, url, _ in valid_channels]
 
