@@ -1,4 +1,4 @@
 requests
 beautifulsoup4
-pytz
-lxml          # 可选，加快解析速度
+lxml
+
