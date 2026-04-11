@@ -1,28 +1,19 @@
-def run(self):
-    print("===== 开始执行 =====")
-    if not self.login():
-        print("登录失败，终止执行")
-        return []
+if __name__ == "__main__":
+    BASE_URL = "http://zhibo.aisimu.cn/zhubo/"
+    LOGIN_URL = "http://zhibo.aisimu.cn/index.php"
+    # 临时硬编码用于调试
+    USERNAME = "xyzvip"
+    PASSWORD = "qq123456"
     
-    print("===== 获取分类 =====")
-    categories = self.get_categories()
-    if not categories:
-        print("未获取到任何分类，尝试打印页面内容用于分析...")
-        # 再次请求首页并打印更多内容
-        resp = self.session.get(self.base_url)
-        print("首页状态码:", resp.status_code)
-        print("首页内容长度:", len(resp.text))
-        print("首页前2000字符:\n", resp.text[:2000])
-        return []
-    
-    all_data = []
-    for cat in categories:
-        channels = self.scrape_channels(cat)
-        print(f"分类 [{cat['name']}] 获取到 {len(channels)} 个频道")
-        for ch in channels:
-            ch = self.test_speed(ch)
-            all_data.append(ch)
-        time.sleep(1)
-    
-    print(f"===== 采集完成，共 {len(all_data)} 条数据 =====")
-    return all_data
+    # 注释掉环境变量读取
+    # USERNAME = os.environ.get("CRAWLER_USERNAME", "")
+    # PASSWORD = os.environ.get("CRAWLER_PASSWORD", "")
+
+    if not USERNAME or not PASSWORD:
+        print("错误：请设置环境变量 CRAWLER_USERNAME 和 CRAWLER_PASSWORD")
+        exit(1)
+
+    crawler = LiveCrawler(BASE_URL, LOGIN_URL, USERNAME, PASSWORD)
+    data = crawler.run()
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(f"\n采集完成，共 {len(data)} 条数据，时间：{crawler.get_beijing_time()}")
