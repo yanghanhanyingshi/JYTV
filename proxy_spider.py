@@ -1,89 +1,108 @@
 import requests
 import socket
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ---------------- 配置项 ----------------
-TIMEOUT = 3  # 测速超时（秒）
-MAX_WORKERS = 30  # 并发测速数
+# ---------------- 配置 ----------------
+TIMEOUT = 3
+MAX_WORKERS = 30
 OUTPUT_FILE = "proxies.txt"
 
-# 多个稳定的公开代理源
-SOURCES = [
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+# 普通文本代理源
+TEXT_PROXY_SOURCES = [
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
 ]
 
-def fetch_proxies():
-    """从多个源爬取代理并去重"""
+# momoproxy 分页配置（从第0页爬到第9页，共10页）
+MOMOPROXY_PAGE_START = 0
+MOMOPROXY_PAGE_END = 9
+MOMOPROXY_PAGE_SIZE = 50
+
+
+def fetch_momoproxy():
     proxies = set()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"
     }
-
-    for url in SOURCES:
+    for page in range(MOMOPROXY_PAGE_START, MOMOPROXY_PAGE_END + 1):
+        url = f"https://free.momoproxy.com/data?pageIndex={page}&pageSize={MOMOPROXY_PAGE_SIZE}"
         try:
-            resp = requests.get(url, headers=headers, timeout=15)
-            resp.raise_for_status()
-            for line in resp.text.splitlines():
-                line = line.strip()
-                if ":" in line and len(line) > 7:
-                    proxies.add(line)
-            print(f"✅ 爬取成功: {url}")
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            for item in data.get("data", []):
+                ip = item.get("ip")
+                port = item.get("port")
+                if ip and port:
+                    proxies.add(f"{ip}:{port}")
+            print(f"✅ momoproxy 第{page}页 抓取完成")
         except Exception as e:
-            print(f"❌ 爬取失败: {url} ({e})")
+            print(f"❌ momoproxy 第{page}页 失败: {e}")
+    return proxies
 
-    # 兜底列表
-    if not proxies:
-        proxies = {
-            "103.152.112.154:80",
-            "190.61.44.14:8080",
-            "103.149.162.194:80",
-            "200.10.230.130:80"
-        }
-        print("⚠️ 所有源爬取失败，使用兜底列表")
 
-    return list(proxies)
+def fetch_text_proxies():
+    proxies = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"
+    }
+    for url in TEXT_PROXY_SOURCES:
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            for line in r.text.splitlines():
+                line = line.strip()
+                if ":" in line and 7 < len(line) < 30:
+                    proxies.add(line)
+            print(f"✅ 文本源抓取: {url}")
+        except Exception as e:
+            print(f"❌ 文本源失败: {url} {e}")
+    return proxies
 
-def is_proxy_alive(proxy):
-    """测试单个代理是否存活"""
+
+def is_alive(proxy):
     try:
-        ip, port = proxy.split(":")
+        ip, port = proxy.split(":", 1)
         port = int(port)
-        # 建立TCP连接测试（比HTTP测试更快）
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(TIMEOUT)
             s.connect((ip, port))
         return proxy
-    except Exception:
+    except:
         return None
 
+
 def main():
-    print("=" * 50)
-    print("🚀 开始爬取代理...")
-    raw_proxies = fetch_proxies()
-    print(f"📦 共爬取到 {len(raw_proxies)} 个代理")
+    print("=" * 60)
+    print("开始抓取代理…")
 
-    print("\n🔍 开始测速过滤（存活代理测试）...")
-    alive_proxies = []
+    # 抓取所有代理
+    proxies = set()
+    proxies.update(fetch_momoproxy())
+    proxies.update(fetch_text_proxies())
+
+    print(f"\n总共抓取代理数量：{len(proxies)}")
+
+    # 测速过滤
+    alive = []
+    print("\n开始测速存活检测…")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(is_proxy_alive, p) for p in raw_proxies]
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                alive_proxies.append(result)
+        tasks = [executor.submit(is_alive, p) for p in proxies]
+        for t in as_completed(tasks):
+            res = t.result()
+            if res:
+                alive.append(res)
 
-    print(f"✅ 测速完成，存活代理: {len(alive_proxies)} 个")
+    print(f"\n存活可用代理：{len(alive)} 个")
 
     # 写入文件
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(alive_proxies)))
+        f.write("\n".join(sorted(alive)))
 
-    print(f"📝 已保存存活代理到 {OUTPUT_FILE}")
-    print("=" * 50)
+    print("已保存到 proxies.txt")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
