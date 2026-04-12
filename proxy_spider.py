@@ -1,33 +1,42 @@
 import requests
+import socket
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ---------------- 配置项 ----------------
+TIMEOUT = 3  # 测速超时（秒）
+MAX_WORKERS = 30  # 并发测速数
+OUTPUT_FILE = "proxies.txt"
+
+# 多个稳定的公开代理源
+SOURCES = [
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
+]
 
 def fetch_proxies():
-    # 用多个稳定的公开代理源，避免单点失败
-    sources = [
-        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
-    ]
-    
-    proxies = set()  # 用集合自动去重
+    """从多个源爬取代理并去重"""
+    proxies = set()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     }
 
-    for url in sources:
+    for url in SOURCES:
         try:
             resp = requests.get(url, headers=headers, timeout=15)
             resp.raise_for_status()
-            text = resp.text.strip()
-            for line in text.splitlines():
+            for line in resp.text.splitlines():
                 line = line.strip()
-                if ":" in line and len(line) > 7:  # 简单格式校验
+                if ":" in line and len(line) > 7:
                     proxies.add(line)
-            print(f"✅ 从 {url} 成功爬取")
+            print(f"✅ 爬取成功: {url}")
         except Exception as e:
-            print(f"❌ 从 {url} 爬取失败: {e}")
+            print(f"❌ 爬取失败: {url} ({e})")
 
-    # 如果所有源都失败，写入兜底IP
+    # 兜底列表
     if not proxies:
         proxies = {
             "103.152.112.154:80",
@@ -37,11 +46,45 @@ def fetch_proxies():
         }
         print("⚠️ 所有源爬取失败，使用兜底列表")
 
-    return sorted(proxies)
+    return list(proxies)
+
+def is_proxy_alive(proxy):
+    """测试单个代理是否存活"""
+    try:
+        ip, port = proxy.split(":")
+        port = int(port)
+        # 建立TCP连接测试（比HTTP测试更快）
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(TIMEOUT)
+            s.connect((ip, port))
+        return proxy
+    except Exception:
+        return None
+
+def main():
+    print("=" * 50)
+    print("🚀 开始爬取代理...")
+    raw_proxies = fetch_proxies()
+    print(f"📦 共爬取到 {len(raw_proxies)} 个代理")
+
+    print("\n🔍 开始测速过滤（存活代理测试）...")
+    alive_proxies = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(is_proxy_alive, p) for p in raw_proxies]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                alive_proxies.append(result)
+
+    print(f"✅ 测速完成，存活代理: {len(alive_proxies)} 个")
+
+    # 写入文件
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(alive_proxies)))
+
+    print(f"📝 已保存存活代理到 {OUTPUT_FILE}")
+    print("=" * 50)
 
 if __name__ == "__main__":
-    proxy_list = fetch_proxies()
-    with open("proxies.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(proxy_list))
-    print(f"🎉 成功写入 {len(proxy_list)} 个代理到 proxies.txt")
+    main()
 
